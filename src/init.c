@@ -537,6 +537,7 @@ static void mi_process_done(void) {
     mi_stats_print(NULL);
   }
   mi_allocator_done();  
+  _mi_os_done();
   _mi_verbose_message("process done: 0x%zx\n", _mi_heap_main.thread_id);
   os_preloading = true; // don't call the C runtime anymore
 }

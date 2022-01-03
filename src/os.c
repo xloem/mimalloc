@@ -37,6 +37,8 @@ terms of the MIT license. A copy of the license can be found in the file
 #else
 #include <sys/mman.h>  // mmap
 #include <unistd.h>    // sysconf
+#include <stdio.h>
+#include <stdlib.h>
 #if defined(__linux__)
 #include <features.h>
 #include <fcntl.h>
@@ -229,12 +231,16 @@ void _mi_os_init(void)
     mi_win_enable_large_os_pages();
   }
 }
+
+void _mi_os_done(void) { }
 #elif defined(__wasi__)
 void _mi_os_init() {
   os_overcommit = false;
   os_page_size = 64*MI_KiB; // WebAssembly has a fixed page size: 64KiB
   os_alloc_granularity = 16;
 }
+
+void _mi_os_done() { }
 
 #else  // generic unix
 
@@ -261,6 +267,14 @@ static void os_detect_overcommit(void) {
 #endif
 }
 
+int vmfd = -1;
+int vmsize = 0;
+char vmfn[1024];
+
+#if defined(MI_USE_PTHREADS)
+static pthread_mutex_t mi_vmem_grow_mutex = PTHREAD_MUTEX_INITIALIZER;
+#endif
+
 void _mi_os_init() {
   // get the page size
   long result = sysconf(_SC_PAGESIZE);
@@ -270,6 +284,19 @@ void _mi_os_init() {
   }
   large_os_page_size = 2*MI_MiB; // TODO: can we query the OS for this?
   os_detect_overcommit();
+  if (getenv("VMEM_PREFIX")) {
+    snprintf(vmfn, sizeof(vmfn), "%s.%d", getenv("VMEM_PREFIX"), getpid());
+    vmfd = open(vmfn, O_CREAT | O_RDWR);
+  }
+}
+
+void _mi_os_done() {
+  if (vmfd != -1) {
+    // WARNING: your memory is stored on disk, just hidden.
+    unlink(vmfn);
+    vmfd = -1;
+    vmsize = 0;
+  }
 }
 #endif
 
@@ -463,21 +490,21 @@ static void* mi_heap_grow(size_t size, size_t try_alignment) {
 -------------------------------------------------------------- */
 #else 
 #define MI_OS_USE_MMAP
-static void* mi_unix_mmapx(void* addr, size_t size, size_t try_alignment, int protect_flags, int flags, int fd) {
+static void* mi_unix_mmapx(void* addr, size_t size, size_t try_alignment, int protect_flags, int flags, int fd, int offset) {
   MI_UNUSED(try_alignment);  
   #if defined(MAP_ALIGNED)  // BSD
   if (addr == NULL && try_alignment > 1 && (try_alignment % _mi_os_page_size()) == 0) {
     size_t n = mi_bsr(try_alignment);
     if (((size_t)1 << n) == try_alignment && n >= 12 && n <= 30) {  // alignment is a power of 2 and 4096 <= alignment <= 1GiB
       flags |= MAP_ALIGNED(n);
-      void* p = mmap(addr, size, protect_flags, flags | MAP_ALIGNED(n), fd, 0);
+      void* p = mmap(addr, size, protect_flags, flags | MAP_ALIGNED(n), fd, offset);
       if (p!=MAP_FAILED) return p;
       // fall back to regular mmap
     }
   }
   #elif defined(MAP_ALIGN)  // Solaris
   if (addr == NULL && try_alignment > 1 && (try_alignment % _mi_os_page_size()) == 0) {
-    void* p = mmap(try_alignment, size, protect_flags, flags | MAP_ALIGN, fd, 0);
+    void* p = mmap(try_alignment, size, protect_flags, flags | MAP_ALIGN, fd, offset);
     if (p!=MAP_FAILED) return p;
     // fall back to regular mmap
   }
@@ -487,14 +514,14 @@ static void* mi_unix_mmapx(void* addr, size_t size, size_t try_alignment, int pr
   if (addr == NULL) {
     void* hint = mi_os_get_aligned_hint(try_alignment, size);
     if (hint != NULL) {
-      void* p = mmap(hint, size, protect_flags, flags, fd, 0);
+      void* p = mmap(hint, size, protect_flags, flags, fd, offset);
       if (p!=MAP_FAILED) return p;
       // fall back to regular mmap
     }
   }
   #endif
   // regular mmap
-  void* p = mmap(addr, size, protect_flags, flags, fd, 0);
+  void* p = mmap(addr, size, protect_flags, flags, fd, offset);
   if (p!=MAP_FAILED) return p;  
   // failed to allocate
   return NULL;
@@ -508,19 +535,34 @@ static void* mi_unix_mmap(void* addr, size_t size, size_t try_alignment, int pro
   #if !defined(MAP_NORESERVE)
   #define MAP_NORESERVE  0
   #endif
-  int flags = MAP_PRIVATE | MAP_ANONYMOUS;
-  int fd = -1;
+  int flags, fd = vmfd;
+  if (fd != -1) {
+    flags = MAP_SHARED;
+    #if defined(MI_USE_PTHREADS)
+    pthread_mutex_lock(&mi_vmem_grow_mutex);
+    #endif
+    if (ftruncate(vmfd, vmsize + size) == -1) {
+      perror(vmfn);
+      fd = -1;
+      #if defined(MI_USE_PTHREADS)
+      pthread_mutex_unlock(&mi_vmem_grow_mutex);
+      #endif
+    }
+  }
+  if (fd == -1) {
+    flags = MAP_PRIVATE | MAP_ANONYMOUS;
+    #if defined(VM_MAKE_TAG)
+    // macOS: tracking anonymous page with a specific ID. (All up to 98 are taken officially but LLVM sanitizers had taken 99)
+    int os_tag = (int)mi_option_get(mi_option_os_tag);
+    if (os_tag < 100 || os_tag > 255) { os_tag = 100; }
+    fd = VM_MAKE_TAG(os_tag);
+    #endif
+  }
   if (_mi_os_has_overcommit()) {
     flags |= MAP_NORESERVE;
   }  
   #if defined(PROT_MAX)
   protect_flags |= PROT_MAX(PROT_READ | PROT_WRITE); // BSD
-  #endif
-  #if defined(VM_MAKE_TAG)
-  // macOS: tracking anonymous page with a specific ID. (All up to 98 are taken officially but LLVM sanitizers had taken 99)
-  int os_tag = (int)mi_option_get(mi_option_os_tag);
-  if (os_tag < 100 || os_tag > 255) { os_tag = 100; }
-  fd = VM_MAKE_TAG(os_tag);
   #endif
   // huge page allocation
   if ((large_only || use_large_os_page(size, try_alignment)) && allow_large) {
@@ -560,13 +602,13 @@ static void* mi_unix_mmap(void* addr, size_t size, size_t try_alignment, int pro
       if (large_only || lflags != flags) {
         // try large OS page allocation
         *is_large = true;
-        p = mi_unix_mmapx(addr, size, try_alignment, protect_flags, lflags, lfd);
+        p = mi_unix_mmapx(addr, size, try_alignment, protect_flags, lflags, lfd, vmsize);
         #ifdef MAP_HUGE_1GB
         if (p == NULL && (lflags & MAP_HUGE_1GB) != 0) {
           mi_huge_pages_available = false; // don't try huge 1GiB pages again
           _mi_warning_message("unable to allocate huge (1GiB) page, trying large (2MiB) pages instead (error %i)\n", errno);
           lflags = ((lflags & ~MAP_HUGE_1GB) | MAP_HUGE_2MB);
-          p = mi_unix_mmapx(addr, size, try_alignment, protect_flags, lflags, lfd);
+          p = mi_unix_mmapx(addr, size, try_alignment, protect_flags, lflags, lfd, vmsize);
         }
         #endif
         if (large_only) return p;
@@ -579,7 +621,7 @@ static void* mi_unix_mmap(void* addr, size_t size, size_t try_alignment, int pro
   // regular allocation
   if (p == NULL) {
     *is_large = false;
-    p = mi_unix_mmapx(addr, size, try_alignment, protect_flags, flags, fd);
+    p = mi_unix_mmapx(addr, size, try_alignment, protect_flags, flags, fd, vmsize);
     if (p != NULL) {
       #if defined(MADV_HUGEPAGE)
       // Many Linux systems don't allow MAP_HUGETLB but they support instead
@@ -607,6 +649,14 @@ static void* mi_unix_mmap(void* addr, size_t size, size_t try_alignment, int pro
   }
   if (p == NULL) {
     _mi_warning_message("unable to allocate OS memory (%zu bytes, error code: %i, address: %p, large only: %d, allow large: %d)\n", size, errno, addr, large_only, allow_large);
+  }
+  if (fd != -1) {
+    if (p != NULL) {
+      vmsize += size;
+    }
+    #if defined(MI_USE_PTHREADS)
+    pthread_mutex_unlock(&mi_vmem_grow_mutex);
+    #endif
   }
   return p;
 }
