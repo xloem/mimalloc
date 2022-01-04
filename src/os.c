@@ -39,6 +39,7 @@ terms of the MIT license. A copy of the license can be found in the file
 #include <unistd.h>    // sysconf
 #include <stdio.h>
 #include <stdlib.h>
+#include <seccomp.h>
 #if defined(__linux__)
 #include <features.h>
 #include <fcntl.h>
@@ -286,7 +287,20 @@ void _mi_os_init() {
   os_detect_overcommit();
   if (getenv("VMEM_PREFIX")) {
     snprintf(vmfn, sizeof(vmfn), "%s.%d", getenv("VMEM_PREFIX"), getpid());
-    vmfd = open(vmfn, O_CREAT | O_RDWR);
+    vmfd = open(vmfn, O_CREAT | O_RDWR, S_IRUSR);
+
+    if (vmfd >= 0) {
+      // disable fork and clone, which would write to the same vmem file
+      void * fctx = seccomp_init(SCMP_ACT_ALLOW);
+      if (fctx) {
+        seccomp_rule_add(fctx, SCMP_ACT_ERRNO(ENOMEM), SCMP_SYS(fork), 0);
+        seccomp_rule_add(fctx, SCMP_ACT_ERRNO(ENOMEM), SCMP_SYS(clone), 0);
+        seccomp_load(fctx);
+        seccomp_release(fctx);
+      }
+    } else {
+      perror(vmfn);
+    }
   }
 }
 

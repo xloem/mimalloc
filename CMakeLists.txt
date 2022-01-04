@@ -224,6 +224,8 @@ else()
   if (MI_LIBATOMIC OR MI_USE_LIBATOMIC) 
     list(APPEND mi_libraries atomic)
   endif()
+  find_library(MI_LIBSECCOMP seccomp REQUIRED)
+  list(APPEND mi_libraries ${MI_LIBSECCOMP})
 endif()
 
 # -----------------------------------------------------------------------------
