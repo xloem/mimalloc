@@ -652,6 +652,8 @@ static void* mi_unix_mmap(void* addr, size_t size, size_t try_alignment, int pro
   }
   if (fd != -1) {
     if (p != NULL) {
+      madvise(p, size, MADV_DONTFORK);
+      madvise(p, size, MADV_SEQUENTIAL);
       vmsize += size;
     }
     #if defined(MI_USE_PTHREADS)
