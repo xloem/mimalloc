@@ -67,6 +67,7 @@ if("${CMAKE_BINARY_DIR}" MATCHES ".*(S|s)ecure$")
   set(MI_SECURE "ON")
 endif()
 
+list(APPEND mi_defines _FILE_OFFSET_BITS=64)      
 
 # -----------------------------------------------------------------------------
 # Process options
