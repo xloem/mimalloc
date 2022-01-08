@@ -268,7 +268,7 @@ static void os_detect_overcommit(void) {
 }
 
 int vmfd = -1;
-int vmsize = 0;
+off_t vmsize = 0;
 char vmfn[1024];
 
 #if defined(MI_USE_PTHREADS)
