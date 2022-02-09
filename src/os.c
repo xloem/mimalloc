@@ -490,7 +490,7 @@ static void* mi_heap_grow(size_t size, size_t try_alignment) {
 -------------------------------------------------------------- */
 #else 
 #define MI_OS_USE_MMAP
-static void* mi_unix_mmapx(void* addr, size_t size, size_t try_alignment, int protect_flags, int flags, int fd, int offset) {
+static void* mi_unix_mmapx(void* addr, size_t size, size_t try_alignment, int protect_flags, int flags, int fd, off_t offset) {
   MI_UNUSED(try_alignment);  
   #if defined(MAP_ALIGNED)  // BSD
   if (addr == NULL && try_alignment > 1 && (try_alignment % _mi_os_page_size()) == 0) {
